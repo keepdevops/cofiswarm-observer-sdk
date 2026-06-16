@@ -1,20 +1,6 @@
 # cofiswarm-observer-sdk
 
-Cofiswarm component: `observer-sdk`.
+Plugin examples for cofiswarm-observer sinks and structured logging.
 
-- Layout: [REPO-STANDARD-LAYOUT](https://github.com/keepdevops/cofiswarmdev/blob/main/docs/REPO-STANDARD-LAYOUT.md)
-- Migration: [MIGRATION-SPRINTS](https://github.com/keepdevops/cofiswarmdev/blob/main/docs/MIGRATION-SPRINTS.md)
-
-## FHS paths
-
-| Path | Purpose |
-|------|---------|
-| `/etc/cofiswarm/observer-sdk/` | config |
-| `/var/lib/cofiswarm/observer-sdk/` | state |
-| `/var/log/cofiswarm/observer-sdk/` | logs |
-
-## Test
-
-```bash
-./test/scripts/assert-layout.sh observer-sdk
-```
+- `examples/structlog_setup.py` — from orchestration telemetry
+- `examples/sink-agent-logs.yaml` — agent log sink contract
