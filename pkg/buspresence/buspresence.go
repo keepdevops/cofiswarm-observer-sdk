@@ -100,6 +100,29 @@ func (p *Publisher) publish(topic string, payload map[string]any) {
 	}
 }
 
+// StartPresence is the one-call, broker-free presence lifecycle for a single component:
+// it announces id "online" to the bridge carrier, re-announces on every observer hello, and
+// returns a stop func that publishes a final "offline" goodbye. It is meant for components
+// that already serve HTTP health/info and just need to appear in the observer's live roster
+// without a NATS broker. A blank base (COFISWARM_BRIDGE_URL unset) makes it a no-op, so it is
+// safe to call unconditionally:
+//
+//	defer buspresence.StartPresence(os.Getenv("COFISWARM_BRIDGE_URL"), id, info)()
+func StartPresence(base, id string, info map[string]any) (stop func()) {
+	if base == "" {
+		return func() {}
+	}
+	p := New(base)
+	announce := func() { p.Announce(id, info) }
+	announce()
+	ctx, cancel := context.WithCancel(context.Background())
+	go p.WatchHello(ctx, announce)
+	return func() {
+		cancel()
+		p.Goodbye(id) // synchronous goodbye so the roster clears before the process exits
+	}
+}
+
 // WatchHello re-announces (via the given callback) whenever the observer broadcasts hello.
 // The callback is invoked at hello time, so a reloaded roster is reflected. Reconnects with
 // capped backoff until ctx is cancelled.

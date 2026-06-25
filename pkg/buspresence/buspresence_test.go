@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -55,6 +56,46 @@ func TestGoodbyePublishesOfflinePresence(t *testing.T) {
 	if _, hasInfo := payload["info"]; hasInfo {
 		t.Fatalf("offline presence should omit info: %v", payload)
 	}
+}
+
+func TestStartPresenceAnnouncesThenGoodbye(t *testing.T) {
+	var mu sync.Mutex
+	var msgs []map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/publish" { // ignore the WatchHello /v1/subscribe long-poll
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		var m map[string]any
+		_ = json.Unmarshal(b, &m)
+		mu.Lock()
+		msgs = append(msgs, m)
+		mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer ts.Close()
+
+	stop := StartPresence(ts.URL, "mode-flat", map[string]any{"name": "mode-flat"})
+	stop() // synchronous goodbye
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(msgs) < 2 {
+		t.Fatalf("want online+offline, got %v", msgs)
+	}
+	first := msgs[0]["payload"].(map[string]any)
+	last := msgs[len(msgs)-1]["payload"].(map[string]any)
+	if first["status"] != "online" || first["component_id"] != "mode-flat" {
+		t.Errorf("first should be online mode-flat: %v", first)
+	}
+	if last["status"] != "offline" || last["component_id"] != "mode-flat" {
+		t.Errorf("last should be offline mode-flat: %v", last)
+	}
+}
+
+func TestStartPresenceBlankBaseIsNoop(t *testing.T) {
+	StartPresence("", "x", nil)() // no base => no-op; stop must be safe to call
 }
 
 func TestAlertPublishesAlert(t *testing.T) {
