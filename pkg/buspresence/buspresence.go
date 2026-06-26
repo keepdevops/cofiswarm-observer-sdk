@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -108,7 +109,14 @@ func (p *Publisher) publish(topic string, payload map[string]any) {
 // safe to call unconditionally:
 //
 //	defer buspresence.StartPresence(os.Getenv("COFISWARM_BRIDGE_URL"), id, info)()
+//
+// Transport: if COFISWARM_ZMQ_PUBLISH_ADDR is set (e.g. tcp://zmq-bridge:5556) presence is
+// published over a native ZMQ PUB socket to the bridge ingress wire and re-announced on a timer;
+// otherwise it uses the HTTP control plane (/v1/publish) and re-announces on observer hello.
 func StartPresence(base, id string, info map[string]any) (stop func()) {
+	if addr := os.Getenv("COFISWARM_ZMQ_PUBLISH_ADDR"); addr != "" {
+		return startPresenceZmq(addr, id, info)
+	}
 	if base == "" {
 		return func() {}
 	}
