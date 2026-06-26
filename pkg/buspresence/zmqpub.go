@@ -21,58 +21,72 @@ const reAnnounceEvery = 20 * time.Second
 // (PUB has no delivery handshake; closing immediately can drop the last frame).
 const goodbyeGrace = 100 * time.Millisecond
 
-// zmqPublisher publishes presence frames over a native ZMQ PUB socket to the bridge ingress wire
+// zmqPubSender publishes frames over a native ZMQ PUB socket to the bridge ingress wire
 // (COFISWARM_ZMQ_PUBLISH_ADDR, e.g. tcp://zmq-bridge:5556) — the native-transport alternative to
 // HTTP /v1/publish. Frames are multipart [topic, json-payload], matching the bridge ingress SUB.
-type zmqPublisher struct {
+// Shared by StartPresence (timer re-announce) and Publisher (direct Announce/AnnounceMembers).
+type zmqPubSender struct {
 	sock zmq4.Socket
 	mu   sync.Mutex // serializes Send (zmq4 sockets are not concurrency-safe)
 }
 
-func (z *zmqPublisher) publish(id, status string, info map[string]any) {
-	payload := map[string]any{"component_id": id, "status": status}
-	if info != nil {
-		payload["info"] = info
+// newZmqPubSender dials a PUB socket to addr. The socket lives until close(); a Background ctx is
+// fine since teardown is explicit.
+func newZmqPubSender(addr string) (*zmqPubSender, error) {
+	sock := zmq4.NewPub(context.Background())
+	if err := sock.Dial(addr); err != nil {
+		_ = sock.Close()
+		return nil, err
 	}
+	return &zmqPubSender{sock: sock}, nil
+}
+
+// send publishes one [topic, json-payload] frame. Failures are logged (never silent).
+func (z *zmqPubSender) send(topic string, payload map[string]any) {
 	data, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("buspresence(zmq): marshal presence: %v", err)
+		log.Printf("buspresence(zmq): marshal %s: %v", topic, err)
 		return
 	}
 	z.mu.Lock()
 	defer z.mu.Unlock()
-	if err := z.sock.Send(zmq4.NewMsgFrom([]byte(contract.TopicPresence), data)); err != nil {
-		log.Printf("buspresence(zmq): publish %s for %s: %v", status, id, err)
+	if err := z.sock.Send(zmq4.NewMsgFrom([]byte(topic), data)); err != nil {
+		log.Printf("buspresence(zmq): publish %s: %v", topic, err)
 	}
+}
+
+func (z *zmqPubSender) close() {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	_ = z.sock.Close()
 }
 
 // startPresenceZmq announces id online over a native PUB socket, re-announces periodically, and
 // returns a stop func that publishes offline and closes the socket. A dial failure logs and
 // degrades to a no-op so callers stay safe (mirrors the HTTP path's blank-base behavior).
 func startPresenceZmq(addr, id string, info map[string]any) func() {
-	ctx, cancel := context.WithCancel(context.Background())
-	sock := zmq4.NewPub(ctx)
-	if err := sock.Dial(addr); err != nil {
+	sender, err := newZmqPubSender(addr)
+	if err != nil {
 		log.Printf("buspresence(zmq): dial %s: %v (presence disabled)", addr, err)
-		cancel()
 		return func() {}
 	}
-	z := &zmqPublisher{sock: sock}
-	go z.announceLoop(ctx, id, info)
+	ctx, cancel := context.WithCancel(context.Background())
+	go announceLoop(ctx, sender, id, info)
 	log.Printf("buspresence(zmq): announcing %s via PUB %s", id, addr)
 	return func() {
 		cancel()
-		z.publish(id, "offline", nil) // final goodbye so the roster clears before TTL
+		sender.send(contract.TopicPresence, presencePayload(id, "offline", nil)) // final goodbye
 		time.Sleep(goodbyeGrace)
-		_ = sock.Close()
+		sender.close()
 	}
 }
 
 // announceLoop sends an initial burst (absorbing the PUB->SUB slow-joiner so the component
 // appears promptly) then re-announces on reAnnounceEvery until ctx is cancelled.
-func (z *zmqPublisher) announceLoop(ctx context.Context, id string, info map[string]any) {
+func announceLoop(ctx context.Context, sender *zmqPubSender, id string, info map[string]any) {
+	online := presencePayload(id, "online", info)
 	for i := 0; i < 3 && ctx.Err() == nil; i++ {
-		z.publish(id, "online", info)
+		sender.send(contract.TopicPresence, online)
 		select {
 		case <-ctx.Done():
 			return
@@ -86,7 +100,16 @@ func (z *zmqPublisher) announceLoop(ctx context.Context, id string, info map[str
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			z.publish(id, "online", info)
+			sender.send(contract.TopicPresence, online)
 		}
 	}
+}
+
+// presencePayload builds the presence object the bridge records and the observer reads.
+func presencePayload(id, status string, info map[string]any) map[string]any {
+	payload := map[string]any{"component_id": id, "status": status}
+	if info != nil {
+		payload["info"] = info
+	}
+	return payload
 }

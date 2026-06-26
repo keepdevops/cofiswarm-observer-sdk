@@ -25,18 +25,32 @@ type Member struct {
 	Info map[string]any // optional descriptive info (name, engine, ...)
 }
 
-// Publisher posts presence/alerts to the bus and re-announces on hello.
+// Publisher posts presence/alerts to the bus and re-announces on hello. When COFISWARM_ZMQ_PUBLISH_ADDR
+// is set it publishes over a native ZMQ PUB socket instead of HTTP /v1/publish; hello-watch still
+// uses the HTTP base (so set COFISWARM_BRIDGE_URL too for re-announce-on-hello).
 type Publisher struct {
 	base   string
 	client *http.Client
+	pub    *zmqPubSender // non-nil => publish over native ZMQ PUB instead of HTTP
 }
 
-// New builds a publisher targeting the bridge base URL (e.g. http://127.0.0.1:5555).
+// New builds a publisher targeting the bridge base URL (e.g. http://127.0.0.1:5555). If
+// COFISWARM_ZMQ_PUBLISH_ADDR is set, presence/alerts publish over a native ZMQ PUB socket to that
+// ingress wire; a dial failure logs and falls back to HTTP.
 func New(bridgeBase string) *Publisher {
-	return &Publisher{
+	p := &Publisher{
 		base:   strings.TrimRight(bridgeBase, "/"),
 		client: &http.Client{Timeout: 5 * time.Second},
 	}
+	if addr := os.Getenv("COFISWARM_ZMQ_PUBLISH_ADDR"); addr != "" {
+		if sender, err := newZmqPubSender(addr); err != nil {
+			log.Printf("buspresence: zmq pub dial %s: %v (falling back to HTTP)", addr, err)
+		} else {
+			p.pub = sender
+			log.Printf("buspresence: publishing over native ZMQ PUB %s", addr)
+		}
+	}
+	return p
 }
 
 // Announce publishes an "online" presence event for a single component.
@@ -82,9 +96,14 @@ func (p *Publisher) publishPresence(id, status string, info map[string]any) {
 	p.publish(contract.TopicPresence, payload)
 }
 
-// publish posts a {topic, payload} envelope to the bridge. Failures are logged (never silent);
-// a non-2xx from the bridge is surfaced too, so a dropped presence event is visible in logs.
+// publish sends a presence/alert event to the bus: over the native ZMQ PUB socket when one is
+// configured, else as a {topic, payload} HTTP envelope to the bridge. Failures are logged (never
+// silent); a non-2xx from the bridge is surfaced too, so a dropped event is visible in logs.
 func (p *Publisher) publish(topic string, payload map[string]any) {
+	if p.pub != nil {
+		p.pub.send(topic, payload)
+		return
+	}
 	body, err := json.Marshal(map[string]any{"topic": topic, "payload": payload})
 	if err != nil {
 		log.Printf("buspresence: marshal %s: %v", topic, err)
